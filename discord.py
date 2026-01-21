@@ -2,7 +2,7 @@ import os
 import discord
 from discord.ext import commands
 
-# Récupération du token depuis Render (Environment Variables)
+# Récupération du token depuis Render
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 if not TOKEN:
@@ -58,7 +58,7 @@ async def on_member_join(member):
         try:
             await member.send(welcome_message)
         except discord.Forbidden:
-            print("⚠️ Impossible d'envoyer le DM de bienvenue")
+            print("⚠️ DM de bienvenue bloqué")
 
 # Commande !check
 @bot.command()
