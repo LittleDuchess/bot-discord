@@ -6,7 +6,10 @@ from discord.ext import commands
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 if not TOKEN:
-    raise RuntimeError("❌ DISCORD_TOKEN introuvable (Render > Environment Variables)")
+    raise RuntimeError(
+        "❌ DISCORD_TOKEN introuvable. "
+        "Ajoute-le dans Render > Environment Variables."
+    )
 
 # Intents nécessaires
 intents = discord.Intents.default()
@@ -20,7 +23,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 async def on_ready():
     print(f"🤖 Bot connecté en tant que {bot.user}")
 
-# Événement : quand un nouveau membre rejoint
+# Quand un nouveau membre rejoint
 @bot.event
 async def on_member_join(member):
     guild = member.guild
@@ -34,7 +37,7 @@ async def on_member_join(member):
         key=lambda m: m.joined_at or discord.utils.utcnow()
     )
 
-    # Position du membre
+    # Numéro du membre
     member_number = next(
         (i + 1 for i, m in enumerate(sorted_members) if m.id == member.id),
         None
@@ -55,7 +58,7 @@ async def on_member_join(member):
         try:
             await member.send(welcome_message)
         except discord.Forbidden:
-            print("⚠️ Impossible d'envoyer le message de bienvenue en DM")
+            print("⚠️ Impossible d'envoyer le DM de bienvenue")
 
 # Commande !check
 @bot.command()
