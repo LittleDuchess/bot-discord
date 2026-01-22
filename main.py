@@ -82,11 +82,6 @@ def parse_birthday(s: str) -> str:
     dt = datetime.strptime(s.title(), "%d-%b")
     return dt.strftime("%d/%m")
 
-def has_required_role(member: discord.Member, required_role_id: int | None) -> bool:
-    if not required_role_id:
-        return True
-    return any(r.id == int(required_role_id) for r in member.roles)
-
 # ============================================================
 # BOT INIT
 # ============================================================
@@ -130,8 +125,10 @@ class RulesView(discord.ui.View):
                 ephemeral=True
             )
 
-        member = interaction.guild.get_member(interaction.user.id)
-        if not member:
+        # ✅ Toujours récupérer un Member à jour (cache = pas fiable)
+        try:
+            member = await interaction.guild.fetch_member(interaction.user.id)
+        except discord.NotFound:
             return await interaction.response.send_message("Erreur: membre introuvable.", ephemeral=True)
 
         if role in member.roles:
@@ -184,7 +181,7 @@ async def rules_set_stafflog(interaction: discord.Interaction, channel: discord.
     cfg = gcfg(interaction.guild.id)
     cfg["staff_log_channel_id"] = channel.id
     save_data(data)
-    await interaction.response.send_message(f"✅ Salon logs staff défini : {channel.mention}", ephemeral=True)
+    await interaction.response.send_message(f"✅ Salonôle logs staff défini : {channel.mention}", ephemeral=True)
 
 @rules_group.command(name="post", description="(Admin) Poste le règlement + bouton dans ce salon")
 @app_commands.checks.has_permissions(administrator=True)
@@ -241,7 +238,6 @@ bot.tree.add_command(rules_group)
 async def on_member_join(member: discord.Member):
     cfg = gcfg(member.guild.id)
 
-    # numéro de membre humain
     members = [m for m in member.guild.members if not m.bot]
     sorted_members = sorted(members, key=lambda m: m.joined_at or discord.utils.utcnow())
     member_number = next((i + 1 for i, m in enumerate(sorted_members) if m.id == member.id), None)
@@ -262,7 +258,6 @@ async def on_member_join(member: discord.Member):
         except discord.Forbidden:
             pass
 
-    # fallback DM
     try:
         await member.send(welcome_message)
     except discord.Forbidden:
@@ -276,7 +271,7 @@ async def check(ctx):
     await ctx.send(f"Tu es le membre numéro **{member_number}** de la Dream Team ! ✨")
 
 # ============================================================
-# 3) ANNIVERSAIRES (/birthday)
+# 3) ANNIVERSAIRES (/birthday) - FIXED member fetch
 # ============================================================
 
 birthday_group = app_commands.Group(name="birthday", description="Anniversaires")
@@ -288,16 +283,22 @@ async def birthday_set(interaction: discord.Interaction, date: str):
         return await interaction.response.send_message("Utilise ça dans un serveur.", ephemeral=True)
 
     cfg = gcfg(interaction.guild.id)
-    member = interaction.guild.get_member(interaction.user.id)
-    if not member:
+
+    # ✅ Toujours récupérer un Member à jour (cache = pas fiable)
+    try:
+        member = await interaction.guild.fetch_member(interaction.user.id)
+    except discord.NotFound:
         return await interaction.response.send_message("Erreur: membre introuvable.", ephemeral=True)
 
-    # réservé aux validés (si le rôle est configuré)
-    if not has_required_role(member, cfg.get("required_role_id")):
-        return await interaction.response.send_message(
-            "🔒 Tu dois valider le règlement (rôle **La dream team ✨**) pour enregistrer ton anniversaire.",
-            ephemeral=True
-        )
+    # réservé aux validés (si rôle configuré)
+    role_id = cfg.get("required_role_id")
+    if role_id:
+        required_role = interaction.guild.get_role(int(role_id))
+        if required_role and required_role not in member.roles:
+            return await interaction.response.send_message(
+                "🔒 Tu dois valider le règlement (rôle **La dream team ✨**) pour enregistrer ton anniversaire.",
+                ephemeral=True
+            )
 
     try:
         ddmm = parse_birthday(date)
