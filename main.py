@@ -6,10 +6,20 @@ from discord.ext import commands
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
-    raise RuntimeError("❌ DISCORD_TOKEN manquant (Render > Environment Variables)")
+    raise RuntimeError("❌ DISCORD_TOKEN introuvable. Ajoute-le dans Render > Environment Variables.")
 
 DATA_FILE = "config.json"
 
+# -------------------- Storage --------------------
+# {
+#   "guilds": {
+#     "<guild_id>": {
+#       "welcome_channel_id": <int|None>,
+#       "required_role_id": <int|None>,       # rôle "La dream team ✨"
+#       "staff_log_channel_id": <int|None>    # salon staff (optionnel)
+#     }
+#   }
+# }
 def load_data():
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -26,18 +36,20 @@ data = load_data()
 def gcfg(guild_id: int):
     gid = str(guild_id)
     data["guilds"].setdefault(gid, {
-        "welcome_channel_id": None,  # <-- on met l'ID, pas le nom
-        "required_role_id": None,    # "La dream team ✨"
-        "staff_log_channel_id": None # optionnel
+        "welcome_channel_id": None,
+        "required_role_id": None,
+        "staff_log_channel_id": None
     })
     return data["guilds"][gid]
 
+# -------------------- Bot --------------------
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# -------------------- VIEW BOUTON RÈGLEMENT --------------------
+# -------------------- Rules Button View (persistent) --------------------
 class RulesView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -53,16 +65,17 @@ class RulesView(discord.ui.View):
 
         cfg = gcfg(interaction.guild.id)
         role_id = cfg.get("required_role_id")
+
         if not role_id:
             return await interaction.response.send_message(
-                "⚠️ Rôle non configuré. Admin: `/rules set_role @La dream team ✨`",
+                "⚠️ Le rôle n’est pas configuré.\nAdmin : `/rules set_role @La dream team ✨`",
                 ephemeral=True
             )
 
         role = interaction.guild.get_role(int(role_id))
         if not role:
             return await interaction.response.send_message(
-                "⚠️ Le rôle configuré n’existe plus.",
+                "⚠️ Le rôle configuré n’existe plus. Admin : `/rules set_role ...`",
                 ephemeral=True
             )
 
@@ -72,77 +85,110 @@ class RulesView(discord.ui.View):
 
         if role in member.roles:
             return await interaction.response.send_message(
-                "✅ Tu as déjà le rôle **La dream team ✨**.",
+                "✅ Tu as déjà accès à **La dream team ✨**.",
                 ephemeral=True
             )
 
-        # Tentative d’ajout de rôle
         try:
             await member.add_roles(role, reason="Validation du règlement")
         except discord.Forbidden:
             return await interaction.response.send_message(
-                "❌ Je ne peux pas donner le rôle.\n"
-                "👉 Vérifie : le bot a **Gérer les rôles** et que son rôle est AU-DESSUS de `La dream team ✨`.",
+                "❌ Je ne peux pas attribuer le rôle.\n"
+                "👉 Vérifie : le bot a **Gérer les rôles** et que son rôle est **au-dessus** de `La dream team ✨`.",
                 ephemeral=True
             )
 
         await interaction.response.send_message(
-            "✅ Bienvenue dans **La dream team ✨** !",
+            "✅ Bienvenue dans **La dream team ✨** !\n"
+            "Tu as maintenant accès au serveur 💙",
             ephemeral=True
         )
 
-        # log staff optionnel
         staff_log_id = cfg.get("staff_log_channel_id")
         if staff_log_id:
             ch = interaction.guild.get_channel(int(staff_log_id))
             if ch:
-                await ch.send(f"✅ Règlement validé : {member.mention} (`{member.id}`)")
+                await ch.send(f"✅ **Règlement validé** : {member.mention} (`{member.id}`)")
 
-# -------------------- COMMANDES SLASH SETUP --------------------
-rules = app_commands.Group(name="rules", description="Règlement / validation")
+# -------------------- Slash commands: /rules --------------------
+rules_group = app_commands.Group(name="rules", description="Règlement / validation")
 
-@rules.command(name="set_role", description="(Admin) Définit le rôle donné quand on valide le règlement")
+@rules_group.command(name="set_role", description="(Admin) Définit le rôle donné après validation")
 @app_commands.checks.has_permissions(administrator=True)
-async def set_role(interaction: discord.Interaction, role: discord.Role):
+async def rules_set_role(interaction: discord.Interaction, role: discord.Role):
     cfg = gcfg(interaction.guild.id)
     cfg["required_role_id"] = role.id
     save_data(data)
-    await interaction.response.send_message(f"✅ Rôle défini : {role.mention}", ephemeral=True)
+    await interaction.response.send_message(f"✅ Rôle de validation défini : {role.mention}", ephemeral=True)
 
-@rules.command(name="set_welcome", description="(Admin) Définit le salon de bienvenue")
+@rules_group.command(name="set_welcome", description="(Admin) Définit le salon de bienvenue")
 @app_commands.checks.has_permissions(administrator=True)
-async def set_welcome(interaction: discord.Interaction, channel: discord.TextChannel):
+async def rules_set_welcome(interaction: discord.Interaction, channel: discord.TextChannel):
     cfg = gcfg(interaction.guild.id)
     cfg["welcome_channel_id"] = channel.id
     save_data(data)
-    await interaction.response.send_message(f"✅ Salon de bienvenue : {channel.mention}", ephemeral=True)
+    await interaction.response.send_message(f"✅ Salon de bienvenue défini : {channel.mention}", ephemeral=True)
 
-@rules.command(name="set_stafflog", description="(Admin) Définit le salon de logs staff (optionnel)")
+@rules_group.command(name="set_stafflog", description="(Admin) Définit le salon de logs staff (optionnel)")
 @app_commands.checks.has_permissions(administrator=True)
-async def set_stafflog(interaction: discord.Interaction, channel: discord.TextChannel):
+async def rules_set_stafflog(interaction: discord.Interaction, channel: discord.TextChannel):
     cfg = gcfg(interaction.guild.id)
     cfg["staff_log_channel_id"] = channel.id
     save_data(data)
-    await interaction.response.send_message(f"✅ Salon logs staff : {channel.mention}", ephemeral=True)
+    await interaction.response.send_message(f"✅ Salon logs staff défini : {channel.mention}", ephemeral=True)
 
-@rules.command(name="post", description="(Admin) Poste le message du règlement + bouton dans ce salon")
+@rules_group.command(name="post", description="(Admin) Poste le règlement + bouton dans ce salon")
 @app_commands.checks.has_permissions(administrator=True)
-async def post(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="📜 Règlement",
-        description="Lis le règlement puis clique sur **Valider le règlement** pour accéder au serveur."
+async def rules_post(interaction: discord.Interaction):
+    if not interaction.channel or not isinstance(interaction.channel, discord.TextChannel):
+        return await interaction.response.send_message("Utilise ça dans un salon texte.", ephemeral=True)
+
+    rules_text = (
+        ":sparkles: **Règlement du serveur discord**\n"
+        "Le non-respect des règles peuvent entrainer un bannissement partiel ou définitif.\n\n"
+        ":one: **Âge minimum**\n"
+        "Ce serveur est réservé aux personnes âgées de 13 ans ou plus, conformément aux règles de Discord.\n"
+        "Si vous avez moins de 13 ans, merci de quitter le serveur immédiatement.\n\n"
+        ":two: **Respect & Comportement**\n"
+        "Soyez respectueux, poli(e)s et bienveillant(e)s envers tous les membres.\n"
+        "Pas d’insultes, moqueries, discriminations, harcèlement ou comportements toxiques.\n"
+        "Pas d’usurpation d’identité (membre, modérateur, bot, etc.).\n\n"
+        ":three: **Contenu & Partages**\n"
+        "Contenu NSFW interdit : pas de contenu adulte, choquant ou gore.\n"
+        "Pas de propos haineux ou discriminatoires (sexisme, racisme, homophobie, etc.).\n"
+        "Pas de partage d’informations personnelles (les vôtres ou celles des autres).\n"
+        "Les spoilers doivent être cachés avec la balise spoiler.\n\n"
+        ":four: **Publicité & Spam**\n"
+        "Publicité interdite sans l’accord du staff (serveurs, liens commerciaux, autopromo).\n"
+        "Pas de spam : pas de messages répétés, d’abus d’emojis ou de mentions.\n\n"
+        ":five: **Sujets sensibles**\n"
+        "Les discussions sur la religion, politique, sexualité ou autres sujets polémiques sont interdites pour préserver une bonne ambiance.\n\n"
+        ":six: **Utilisation des salons**\n"
+        "Respectez les thèmes des salons : postez dans les bons channels.\n"
+        "Ne pas déranger les vocaux avec des bruits gênants, cris ou musiques sans l’accord des participants.\n\n"
+        ":seven: **Pseudo & Avatar**\n"
+        "Choisissez un pseudo et un avatar corrects et lisibles.\n"
+        "Pas de pseudos ou images choquantes, sexuelles, provocantes ou discriminatoires.\n\n"
+        ":eight: **Comportement en vocal**\n"
+        "Soyez respectueux aussi bien à l’oral qu’à l’écrit.\n"
+        "Pas d’abus de bruit, d’interruptions ou de comportement gênant.\n\n"
+        ":nine: **Modération & Sanctions**\n"
+        "Les décisions du staff doivent être respectées.\n"
+        "En cas de problème, contactez un modérateur en MP.\n\n"
+        ":warning: **Pensez à cliquer sur le bouton ✅ pour voir le serveur entier.**"
     )
+
+    embed = discord.Embed(title="📜 Règlement", description=rules_text)
     await interaction.channel.send(embed=embed, view=RulesView())
-    await interaction.response.send_message("✅ Règlement posté.", ephemeral=True)
+    await interaction.response.send_message("✅ Règlement posté avec le bouton.", ephemeral=True)
 
-bot.tree.add_command(rules)
+bot.tree.add_command(rules_group)
 
-# -------------------- BIENVENUE (SALON ID) --------------------
+# -------------------- Welcome message --------------------
 @bot.event
 async def on_member_join(member: discord.Member):
     cfg = gcfg(member.guild.id)
 
-    # calc numéro de membre (humains)
     members = [m for m in member.guild.members if not m.bot]
     sorted_members = sorted(members, key=lambda m: m.joined_at or discord.utils.utcnow())
     member_number = next((i + 1 for i, m in enumerate(sorted_members) if m.id == member.id), None)
@@ -159,19 +205,17 @@ async def on_member_join(member: discord.Member):
     if channel:
         try:
             await channel.send(welcome_message)
-        except discord.Forbidden:
-            # si le bot ne peut pas écrire -> DM fallback
-            try:
-                await member.send(welcome_message)
-            except discord.Forbidden:
-                pass
-    else:
-        # si salon pas configuré -> DM fallback
-        try:
-            await member.send(welcome_message)
+            return
         except discord.Forbidden:
             pass
 
+    # fallback DM
+    try:
+        await member.send(welcome_message)
+    except discord.Forbidden:
+        pass
+
+# -------------------- !check command --------------------
 @bot.command()
 async def check(ctx):
     members = [m for m in ctx.guild.members if not m.bot]
@@ -179,10 +223,11 @@ async def check(ctx):
     member_number = next((i + 1 for i, m in enumerate(sorted_members) if m.id == ctx.author.id), None)
     await ctx.send(f"Tu es le membre numéro **{member_number}** de la Dream Team ! ✨")
 
+# -------------------- Ready --------------------
 @bot.event
 async def on_ready():
     print(f"🤖 Connecté en tant que {bot.user}")
-    bot.add_view(RulesView())  # rend le bouton persistant après redémarrage
+    bot.add_view(RulesView())  # bouton persistant même après redémarrage
     await bot.tree.sync()
     print("✅ Slash commands synchronisées.")
 
