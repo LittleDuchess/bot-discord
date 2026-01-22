@@ -2,24 +2,34 @@ import os
 import json
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+# ============================================================
+# CONFIG
+# ============================================================
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise RuntimeError("❌ DISCORD_TOKEN introuvable. Ajoute-le dans Render > Environment Variables.")
 
-DATA_FILE = "config.json"
+TZ = ZoneInfo("Europe/Paris")
+DATA_FILE = "bot_data.json"
 
-# -------------------- Storage --------------------
+# Structure:
 # {
 #   "guilds": {
 #     "<guild_id>": {
 #       "welcome_channel_id": <int|None>,
 #       "required_role_id": <int|None>,       # rôle "La dream team ✨"
-#       "staff_log_channel_id": <int|None>    # salon staff (optionnel)
+#       "staff_log_channel_id": <int|None>,   # optionnel
+#       "birthday_channel_id": <int|None>,    # salon anniversaires
+#       "birthdays": { "<user_id>": "DD/MM" }
 #     }
 #   }
 # }
+
 def load_data():
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -38,18 +48,59 @@ def gcfg(guild_id: int):
     data["guilds"].setdefault(gid, {
         "welcome_channel_id": None,
         "required_role_id": None,
-        "staff_log_channel_id": None
+        "staff_log_channel_id": None,
+        "birthday_channel_id": None,
+        "birthdays": {}
     })
     return data["guilds"][gid]
 
-# -------------------- Bot --------------------
+# ============================================================
+# HELPERS
+# ============================================================
+
+def parse_birthday(s: str) -> str:
+    """
+    Accepte:
+      - 25-Oct
+      - 25/10
+      - 25-10
+      - 25.10
+    Stocke en "DD/MM"
+    """
+    s = s.strip()
+
+    # formats numériques
+    for sep in ["/", "-", "."]:
+        if sep in s:
+            parts = s.split(sep)
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                d = int(parts[0]); m = int(parts[1])
+                if 1 <= d <= 31 and 1 <= m <= 12:
+                    return f"{d:02d}/{m:02d}"
+
+    # format 25-Oct
+    dt = datetime.strptime(s.title(), "%d-%b")
+    return dt.strftime("%d/%m")
+
+def has_required_role(member: discord.Member, required_role_id: int | None) -> bool:
+    if not required_role_id:
+        return True
+    return any(r.id == int(required_role_id) for r in member.roles)
+
+# ============================================================
+# BOT INIT
+# ============================================================
+
 intents = discord.Intents.default()
 intents.members = True
-intents.message_content = True
+intents.message_content = True  # pour !check
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# -------------------- Rules Button View (persistent) --------------------
+# ============================================================
+# 1) RÈGLEMENT -> BOUTON -> DONNE LE RÔLE
+# ============================================================
+
 class RulesView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -99,8 +150,7 @@ class RulesView(discord.ui.View):
             )
 
         await interaction.response.send_message(
-            "✅ Bienvenue dans **La dream team ✨** !\n"
-            "Tu as maintenant accès au serveur 💙",
+            "✅ Bienvenue dans **La dream team ✨** !\nTu as maintenant accès au serveur 💙",
             ephemeral=True
         )
 
@@ -110,7 +160,6 @@ class RulesView(discord.ui.View):
             if ch:
                 await ch.send(f"✅ **Règlement validé** : {member.mention} (`{member.id}`)")
 
-# -------------------- Slash commands: /rules --------------------
 rules_group = app_commands.Group(name="rules", description="Règlement / validation")
 
 @rules_group.command(name="set_role", description="(Admin) Définit le rôle donné après validation")
@@ -129,7 +178,7 @@ async def rules_set_welcome(interaction: discord.Interaction, channel: discord.T
     save_data(data)
     await interaction.response.send_message(f"✅ Salon de bienvenue défini : {channel.mention}", ephemeral=True)
 
-@rules_group.command(name="set_stafflog", description="(Admin) Définit le salon de logs staff (optionnel)")
+@rules_group.command(name="set_stafflog", description="(Admin) Définit le salon logs staff (optionnel)")
 @app_commands.checks.has_permissions(administrator=True)
 async def rules_set_stafflog(interaction: discord.Interaction, channel: discord.TextChannel):
     cfg = gcfg(interaction.guild.id)
@@ -184,11 +233,15 @@ async def rules_post(interaction: discord.Interaction):
 
 bot.tree.add_command(rules_group)
 
-# -------------------- Welcome message --------------------
+# ============================================================
+# 2) BIENVENUE + !check
+# ============================================================
+
 @bot.event
 async def on_member_join(member: discord.Member):
     cfg = gcfg(member.guild.id)
 
+    # numéro de membre humain
     members = [m for m in member.guild.members if not m.bot]
     sorted_members = sorted(members, key=lambda m: m.joined_at or discord.utils.utcnow())
     member_number = next((i + 1 for i, m in enumerate(sorted_members) if m.id == member.id), None)
@@ -215,7 +268,6 @@ async def on_member_join(member: discord.Member):
     except discord.Forbidden:
         pass
 
-# -------------------- !check command --------------------
 @bot.command()
 async def check(ctx):
     members = [m for m in ctx.guild.members if not m.bot]
@@ -223,13 +275,123 @@ async def check(ctx):
     member_number = next((i + 1 for i, m in enumerate(sorted_members) if m.id == ctx.author.id), None)
     await ctx.send(f"Tu es le membre numéro **{member_number}** de la Dream Team ! ✨")
 
-# -------------------- Ready --------------------
+# ============================================================
+# 3) ANNIVERSAIRES (/birthday)
+# ============================================================
+
+birthday_group = app_commands.Group(name="birthday", description="Anniversaires")
+
+@birthday_group.command(name="set", description="Enregistre ton anniversaire (ex: 25-Oct ou 25/10)")
+@app_commands.describe(date="Ex: 25-Oct ou 25/10")
+async def birthday_set(interaction: discord.Interaction, date: str):
+    if not interaction.guild:
+        return await interaction.response.send_message("Utilise ça dans un serveur.", ephemeral=True)
+
+    cfg = gcfg(interaction.guild.id)
+    member = interaction.guild.get_member(interaction.user.id)
+    if not member:
+        return await interaction.response.send_message("Erreur: membre introuvable.", ephemeral=True)
+
+    # réservé aux validés (si le rôle est configuré)
+    if not has_required_role(member, cfg.get("required_role_id")):
+        return await interaction.response.send_message(
+            "🔒 Tu dois valider le règlement (rôle **La dream team ✨**) pour enregistrer ton anniversaire.",
+            ephemeral=True
+        )
+
+    try:
+        ddmm = parse_birthday(date)
+    except Exception:
+        return await interaction.response.send_message(
+            "❌ Format invalide. Exemples: `25-Oct` ou `25/10`",
+            ephemeral=True
+        )
+
+    cfg["birthdays"][str(interaction.user.id)] = ddmm
+    save_data(data)
+
+    await interaction.response.send_message(
+        "✅ Ton anniversaire est bien enregistré 🎂\nHâte d’être à ce jour si spécial ✨",
+        ephemeral=True
+    )
+
+@birthday_group.command(name="me", description="Affiche ton anniversaire enregistré (réponse cachée)")
+async def birthday_me(interaction: discord.Interaction):
+    if not interaction.guild:
+        return await interaction.response.send_message("Utilise ça dans un serveur.", ephemeral=True)
+
+    cfg = gcfg(interaction.guild.id)
+    ddmm = cfg["birthdays"].get(str(interaction.user.id))
+    if not ddmm:
+        return await interaction.response.send_message(
+            "ℹ️ Tu n’as pas encore enregistré ton anniversaire.\nFais `/birthday set date:25-Oct`",
+            ephemeral=True
+        )
+    await interaction.response.send_message(f"🎂 Ton anniversaire enregistré : **{ddmm}**", ephemeral=True)
+
+@birthday_group.command(name="remove", description="Supprime ton anniversaire enregistré")
+async def birthday_remove(interaction: discord.Interaction):
+    if not interaction.guild:
+        return await interaction.response.send_message("Utilise ça dans un serveur.", ephemeral=True)
+
+    cfg = gcfg(interaction.guild.id)
+    existed = cfg["birthdays"].pop(str(interaction.user.id), None)
+    save_data(data)
+
+    await interaction.response.send_message(
+        "🗑️ Anniversaire supprimé." if existed else "ℹ️ Aucun anniversaire enregistré.",
+        ephemeral=True
+    )
+
+@birthday_group.command(name="set_channel", description="(Admin) Définit le salon où le bot annonce les anniversaires")
+@app_commands.checks.has_permissions(administrator=True)
+async def birthday_set_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    cfg = gcfg(interaction.guild.id)
+    cfg["birthday_channel_id"] = channel.id
+    save_data(data)
+    await interaction.response.send_message(f"✅ Salon anniversaires défini : {channel.mention}", ephemeral=True)
+
+bot.tree.add_command(birthday_group)
+
+@tasks.loop(minutes=1)
+async def birthday_daily_loop():
+    # envoie à 09:00 (Paris) le jour J
+    now = datetime.now(TZ)
+    if not (now.hour == 9 and now.minute == 0):
+        return
+
+    today = now.strftime("%d/%m")
+
+    for guild in bot.guilds:
+        cfg = gcfg(guild.id)
+        ch_id = cfg.get("birthday_channel_id")
+        if not ch_id:
+            continue
+
+        channel = guild.get_channel(int(ch_id))
+        if not channel:
+            continue
+
+        todays_users = [uid for uid, ddmm in cfg["birthdays"].items() if ddmm == today]
+        if not todays_users:
+            continue
+
+        mentions = " ".join(f"<@{uid}>" for uid in todays_users)
+        await channel.send(f"🥳🎂 **Joyeux anniversaire** {mentions} !! 🎉✨")
+
+# ============================================================
+# READY
+# ============================================================
+
 @bot.event
 async def on_ready():
     print(f"🤖 Connecté en tant que {bot.user}")
-    bot.add_view(RulesView())  # bouton persistant même après redémarrage
+    bot.add_view(RulesView())  # bouton persistant après redémarrage
     await bot.tree.sync()
     print("✅ Slash commands synchronisées.")
+
+    if not birthday_daily_loop.is_running():
+        birthday_daily_loop.start()
 
 print("✅ Le bot est en train de démarrer...")
 bot.run(TOKEN)
